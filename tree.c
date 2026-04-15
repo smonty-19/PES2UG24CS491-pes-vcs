@@ -231,12 +231,20 @@ int tree_from_index(ObjectID *id_out) {
         return rc;
     }
 
-    DirNode dirs[2048];
-    ObjectID dir_ids[2048];
+    // IMPORTANT: heap allocation to avoid stack overflow
+    DirNode *dirs = (DirNode *)calloc(2048, sizeof(DirNode));
+    ObjectID *dir_ids = (ObjectID *)calloc(2048, sizeof(ObjectID));
+    if (!dirs || !dir_ids) {
+        free(dirs);
+        free(dir_ids);
+        return -1;
+    }
+
+    int rc = -1; // default fail
     int dir_count = 0;
 
     // Ensure root node exists
-    if (dir_ensure(dirs, &dir_count, "") < 0) return -1;
+    if (dir_ensure(dirs, &dir_count, "") < 0) goto cleanup;
 
     // 1) Add all file entries to their direct directory node, and ensure parent directory nodes exist.
     for (int i = 0; i < idx.count; i++) {
@@ -244,10 +252,10 @@ int tree_from_index(ObjectID *id_out) {
         split_path_dir_base(idx.entries[i].path, dir, sizeof(dir), base, sizeof(base));
 
         int d_idx = dir_ensure(dirs, &dir_count, dir);
-        if (d_idx < 0) return -1;
+        if (d_idx < 0) goto cleanup;
 
         if (tree_add_entry(&dirs[d_idx].tree, idx.entries[i].mode, &idx.entries[i].hash, base) != 0) {
-            return -1;
+            goto cleanup;
         }
 
         // Ensure all ancestors exist
@@ -256,7 +264,7 @@ int tree_from_index(ObjectID *id_out) {
         while (walk[0] != '\0') {
             char parent[512], name[256];
             split_dir_parent_base(walk, parent, sizeof(parent), name, sizeof(name));
-            if (dir_ensure(dirs, &dir_count, parent) < 0) return -1;
+            if (dir_ensure(dirs, &dir_count, parent) < 0) goto cleanup;
             snprintf(walk, sizeof(walk), "%s", parent);
         }
     }
@@ -278,11 +286,11 @@ int tree_from_index(ObjectID *id_out) {
     for (int i = 0; i < dir_count; i++) {
         void *raw = NULL;
         size_t raw_len = 0;
-        if (tree_serialize(&dirs[i].tree, &raw, &raw_len) != 0) return -1;
+        if (tree_serialize(&dirs[i].tree, &raw, &raw_len) != 0) goto cleanup;
 
         if (object_write(OBJ_TREE, raw, raw_len, &dir_ids[i]) != 0) {
             free(raw);
-            return -1;
+            goto cleanup;
         }
         free(raw);
 
@@ -291,17 +299,25 @@ int tree_from_index(ObjectID *id_out) {
             split_dir_parent_base(dirs[i].dir, parent, sizeof(parent), base, sizeof(base));
 
             int p_idx = dir_find(dirs, dir_count, parent);
-            if (p_idx < 0) return -1;
+            if (p_idx < 0) goto cleanup;
 
             if (tree_add_entry(&dirs[p_idx].tree, MODE_DIR, &dir_ids[i], base) != 0) {
-                return -1;
+                goto cleanup;
             }
         }
     }
 
     // 4) Return root tree ID
-    int root_idx = dir_find(dirs, dir_count, "");
-    if (root_idx < 0) return -1;
-    *id_out = dir_ids[root_idx];
-    return 0;
+    {
+        int root_idx = dir_find(dirs, dir_count, "");
+        if (root_idx < 0) goto cleanup;
+        *id_out = dir_ids[root_idx];
+    }
+
+    rc = 0;
+
+cleanup:
+    free(dirs);
+    free(dir_ids);
+    return rc;
 }
